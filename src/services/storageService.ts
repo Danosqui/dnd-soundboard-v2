@@ -5,8 +5,7 @@ import {
   deleteDoc, 
   onSnapshot, 
   query, 
-  orderBy,
-  getDocs 
+  orderBy 
 } from 'firebase/firestore';
 import { 
   ref, 
@@ -53,7 +52,7 @@ export const storageService = {
         if (snapshot.empty) {
           // If Firestore categories collection is empty, seed with defaults!
           DEFAULT_CATEGORIES.forEach(cat => {
-            setDoc(doc(db, 'categories', cat.id), cat);
+            setDoc(doc(db, 'categories', cat.id), cat).catch(() => {});
           });
           callback(DEFAULT_CATEGORIES);
         } else {
@@ -67,13 +66,12 @@ export const storageService = {
       });
       return unsubscribe;
     } else {
-      // Local fallback
+      // Local fallback with immediate fetch + event-based subscription
       localDb.getCategories().then(callback);
-      // Return a no-op unsubscribe or custom event
-      const interval = setInterval(() => {
+      const unsub = localDb.subscribeCategories(() => {
         localDb.getCategories().then(callback);
-      }, 5000);
-      return () => clearInterval(interval);
+      });
+      return unsub;
     }
   },
 
@@ -93,11 +91,12 @@ export const storageService = {
       });
       return unsubscribe;
     } else {
+      // Local fallback with immediate fetch + event-based subscription
       localDb.getSounds().then(callback);
-      const interval = setInterval(() => {
+      const unsub = localDb.subscribeSounds(() => {
         localDb.getSounds().then(callback);
-      }, 5000);
-      return () => clearInterval(interval);
+      });
+      return unsub;
     }
   },
 
@@ -105,7 +104,8 @@ export const storageService = {
   async uploadAudioFile(
     file: File, 
     soundData: Partial<SoundItem>, 
-    onProgress?: UploadProgressCallback
+    onProgress?: UploadProgressCallback,
+    abortSignal?: AbortSignal
   ): Promise<SoundItem> {
     const { db, storage, isConfigured } = getFirebaseInstances();
     const soundId = soundData.id || `sound_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
@@ -114,6 +114,7 @@ export const storageService = {
     let storagePath = '';
 
     if (isConfigured && storage && db) {
+      if (onProgress) onProgress(5);
       // Clean filename
       const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
       storagePath = `sounds/${soundId}/${safeName}`;
@@ -121,18 +122,40 @@ export const storageService = {
 
       const uploadTask = uploadBytesResumable(fileRef, file);
 
+      // Handle abort signal
+      if (abortSignal) {
+        abortSignal.addEventListener('abort', () => {
+          uploadTask.cancel();
+        });
+      }
+
       await new Promise<void>((resolve, reject) => {
+        // 25 second timeout safeguard so Firebase never hangs indefinitely
+        const timeout = setTimeout(() => {
+          uploadTask.cancel();
+          reject(new Error('Firebase upload timed out (25s). Check internet connection, CORS, or Firebase Storage rules.'));
+        }, 25000);
+
         uploadTask.on(
           'state_changed',
           (snapshot) => {
-            const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
-            if (onProgress) onProgress(progress);
+            const rawProgress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+            // Smooth progress
+            if (onProgress) onProgress(Math.min(95, Math.max(10, Math.round(rawProgress))));
           },
-          (error) => reject(error),
+          (error) => {
+            clearTimeout(timeout);
+            reject(error);
+          },
           async () => {
-            downloadUrl = await getDownloadURL(uploadTask.snapshot.ref);
-            if (onProgress) onProgress(100);
-            resolve();
+            clearTimeout(timeout);
+            try {
+              downloadUrl = await getDownloadURL(uploadTask.snapshot.ref);
+              if (onProgress) onProgress(98);
+              resolve();
+            } catch (err) {
+              reject(err);
+            }
           }
         );
       });
@@ -152,12 +175,19 @@ export const storageService = {
       };
 
       await setDoc(doc(db, 'sounds', soundId), newSound);
+      if (onProgress) onProgress(100);
       return newSound;
     } else {
-      // Local IndexedDB fallback
-      if (onProgress) onProgress(30);
+      // Local IndexedDB Mode
+      if (onProgress) onProgress(25);
+      
+      if (abortSignal?.aborted) {
+        throw new Error('Upload cancelled');
+      }
+
       await localDb.saveBlob(soundId, file);
-      if (onProgress) onProgress(80);
+      if (onProgress) onProgress(65);
+
       const objectUrl = URL.createObjectURL(file);
       storagePath = `local://${soundId}`;
 

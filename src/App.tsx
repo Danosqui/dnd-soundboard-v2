@@ -299,6 +299,10 @@ export const App: React.FC = () => {
         categories={categories}
         currentCategoryId={selectedCategoryId}
         onClose={() => setIsBulkUploadOpen(false)}
+        onUploadSuccess={() => {
+          storageService.subscribeSounds(setSounds);
+          storageService.subscribeCategories(setCategories);
+        }}
       />
 
       <EditSoundModal

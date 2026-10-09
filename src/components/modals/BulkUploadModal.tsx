@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { SoundCategory, SoundItem } from '../../types/sound';
 import { storageService } from '../../services/storageService';
 import { SoundIcon } from '../icons/IconLibrary';
@@ -12,9 +12,9 @@ import {
   Trash2, 
   Repeat, 
   Zap, 
-  Folder,
   Sparkles,
-  Layers
+  Layers,
+  StopCircle
 } from 'lucide-react';
 
 interface FileUploadItem {
@@ -46,9 +46,7 @@ export const BulkUploadModal: React.FC<BulkUploadModalProps> = ({
   onUploadSuccess,
 }) => {
   const [queue, setQueue] = useState<FileUploadItem[]>([]);
-  const [batchCategory, setBatchCategory] = useState<string>(
-    currentCategoryId && currentCategoryId !== 'all' ? currentCategoryId : (categories[0]?.id || '')
-  );
+  const [batchCategory, setBatchCategory] = useState<string>('');
   const [batchIcon, setBatchIcon] = useState<string>('Volume2');
   const [batchLoop, setBatchLoop] = useState<boolean>(false);
   const [batchStopCategoryOthers, setBatchStopCategoryOthers] = useState<boolean>(true);
@@ -57,20 +55,43 @@ export const BulkUploadModal: React.FC<BulkUploadModalProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Sync category default when categories or currentCategoryId changes
+  useEffect(() => {
+    if (categories.length > 0) {
+      if (currentCategoryId && currentCategoryId !== 'all' && categories.some(c => c.id === currentCategoryId)) {
+        setBatchCategory(currentCategoryId);
+      } else if (!batchCategory || !categories.some(c => c.id === batchCategory)) {
+        setBatchCategory(categories[0].id);
+      }
+    }
+  }, [categories, currentCategoryId]);
+
+  // Handle escape key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isOpen) {
+        handleCancelOrClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, isUploading]);
 
   if (!isOpen) return null;
 
   const handleFilesSelected = (files: FileList | null) => {
     if (!files || files.length === 0) return;
 
+    const targetCat = batchCategory || categories[0]?.id || 'cat-combat';
+
     const newItems: FileUploadItem[] = Array.from(files).map((file, idx) => {
-      // Guess clean title from file name
       const cleanTitle = file.name
         .replace(/\.[^/.]+$/, '')
         .replace(/[-_]/g, ' ')
         .trim();
 
-      // Guess icon based on filename keywords
       let guessedIcon = batchIcon;
       const lower = cleanTitle.toLowerCase();
       if (lower.includes('rain') || lower.includes('storm')) guessedIcon = 'CloudRain';
@@ -86,7 +107,7 @@ export const BulkUploadModal: React.FC<BulkUploadModalProps> = ({
         id: `upload_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
         file,
         title: cleanTitle,
-        categoryId: batchCategory || categories[0]?.id || '',
+        categoryId: targetCat,
         icon: guessedIcon,
         loop: batchLoop,
         stopCategoryOthers: batchStopCategoryOthers,
@@ -130,7 +151,7 @@ export const BulkUploadModal: React.FC<BulkUploadModalProps> = ({
     setQueue((prev) =>
       prev.map((item) => ({
         ...item,
-        categoryId: batchCategory,
+        categoryId: batchCategory || categories[0]?.id || item.categoryId,
         icon: batchIcon,
         loop: batchLoop,
         stopCategoryOthers: batchStopCategoryOthers,
@@ -142,31 +163,43 @@ export const BulkUploadModal: React.FC<BulkUploadModalProps> = ({
     if (queue.length === 0 || isUploading) return;
 
     setIsUploading(true);
+    abortControllerRef.current = new AbortController();
 
     for (let i = 0; i < queue.length; i++) {
+      if (abortControllerRef.current?.signal.aborted) break;
+
       const item = queue[i];
       if (item.status === 'completed') continue;
 
-      updateItem(item.id, { status: 'uploading', progress: 5 });
+      updateItem(item.id, { status: 'uploading', progress: 15 });
 
       try {
         await storageService.uploadAudioFile(
           item.file,
           {
             title: item.title,
-            categoryId: item.categoryId,
+            categoryId: item.categoryId || categories[0]?.id || 'cat-combat',
             icon: item.icon,
             loop: item.loop,
             stopCategoryOthers: item.stopCategoryOthers,
             volume: 1.0,
           },
           (prog) => {
-            updateItem(item.id, { progress: Math.round(prog) });
-          }
+            if (!abortControllerRef.current?.signal.aborted) {
+              updateItem(item.id, { progress: Math.max(15, Math.round(prog)) });
+            }
+          },
+          abortControllerRef.current.signal
         );
 
-        updateItem(item.id, { status: 'completed', progress: 100 });
+        if (!abortControllerRef.current?.signal.aborted) {
+          updateItem(item.id, { status: 'completed', progress: 100 });
+        }
       } catch (err: any) {
+        if (abortControllerRef.current?.signal.aborted) {
+          updateItem(item.id, { status: 'error', errorMessage: 'Upload stopped' });
+          break;
+        }
         console.error('Failed to upload file:', item.file.name, err);
         updateItem(item.id, {
           status: 'error',
@@ -176,14 +209,37 @@ export const BulkUploadModal: React.FC<BulkUploadModalProps> = ({
     }
 
     setIsUploading(false);
+    abortControllerRef.current = null;
     if (onUploadSuccess) onUploadSuccess();
   };
 
+  const handleStopUpload = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    setIsUploading(false);
+  };
+
+  const handleCancelOrClose = () => {
+    if (isUploading) {
+      handleStopUpload();
+    }
+    onClose();
+  };
+
   const allCompleted = queue.length > 0 && queue.every((i) => i.status === 'completed');
+  const completedCount = queue.filter(q => q.status === 'completed').length;
 
   return (
     <>
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
+      <div 
+        className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-fade-in"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) {
+            handleCancelOrClose();
+          }
+        }}
+      >
         <div className="bg-[#161b22] border border-[#30363d] w-full max-w-2xl rounded-2xl shadow-2xl flex flex-col max-h-[92vh] overflow-hidden">
           
           {/* Header */}
@@ -197,10 +253,12 @@ export const BulkUploadModal: React.FC<BulkUploadModalProps> = ({
                 <p className="text-xs text-gray-400">Supports MP3, WAV, FLAC, OGG, AAC, M4A, MP4</p>
               </div>
             </div>
+            
+            {/* Always accessible close button */}
             <button
-              onClick={onClose}
-              disabled={isUploading}
+              onClick={handleCancelOrClose}
               className="p-1.5 text-gray-400 hover:text-white rounded-lg hover:bg-[#21262d] transition-colors"
+              title="Close modal"
             >
               <X className="w-5 h-5" />
             </button>
@@ -248,7 +306,8 @@ export const BulkUploadModal: React.FC<BulkUploadModalProps> = ({
                   <button
                     type="button"
                     onClick={applyBatchSettingsToAll}
-                    className="text-xs text-purple-400 hover:text-purple-300 font-medium hover:underline"
+                    disabled={isUploading}
+                    className="text-xs text-purple-400 hover:text-purple-300 font-medium hover:underline disabled:opacity-50"
                   >
                     Apply to all {queue.length} files
                   </button>
@@ -260,8 +319,9 @@ export const BulkUploadModal: React.FC<BulkUploadModalProps> = ({
                     <label className="block text-gray-400 mb-1">Category</label>
                     <select
                       value={batchCategory}
+                      disabled={isUploading}
                       onChange={(e) => setBatchCategory(e.target.value)}
-                      className="w-full px-2.5 py-1.5 bg-[#161b22] border border-[#30363d] rounded-lg text-white"
+                      className="w-full px-2.5 py-1.5 bg-[#161b22] border border-[#30363d] rounded-lg text-white disabled:opacity-50"
                     >
                       {categories.map((c) => (
                         <option key={c.id} value={c.id}>
@@ -276,8 +336,9 @@ export const BulkUploadModal: React.FC<BulkUploadModalProps> = ({
                     <label className="block text-gray-400 mb-1">Default Icon</label>
                     <button
                       type="button"
+                      disabled={isUploading}
                       onClick={() => setIsIconPickerOpen(true)}
-                      className="w-full px-2 py-1.5 bg-[#161b22] border border-[#30363d] rounded-lg text-white flex items-center justify-between"
+                      className="w-full px-2 py-1.5 bg-[#161b22] border border-[#30363d] rounded-lg text-white flex items-center justify-between disabled:opacity-50"
                     >
                       <div className="flex items-center space-x-1.5">
                         <SoundIcon name={batchIcon} className="w-4 h-4 text-purple-400" />
@@ -293,6 +354,7 @@ export const BulkUploadModal: React.FC<BulkUploadModalProps> = ({
                       <input
                         type="checkbox"
                         checked={batchLoop}
+                        disabled={isUploading}
                         onChange={(e) => setBatchLoop(e.target.checked)}
                         className="accent-purple-600 rounded"
                       />
@@ -307,6 +369,7 @@ export const BulkUploadModal: React.FC<BulkUploadModalProps> = ({
                       <input
                         type="checkbox"
                         checked={batchStopCategoryOthers}
+                        disabled={isUploading}
                         onChange={(e) => setBatchStopCategoryOthers(e.target.checked)}
                         className="accent-amber-600 rounded"
                       />
@@ -351,17 +414,28 @@ export const BulkUploadModal: React.FC<BulkUploadModalProps> = ({
                           <span>{categories.find(c => c.id === item.categoryId)?.name || 'Category'}</span>
                           {item.loop && <span>• Loop</span>}
                           {item.stopCategoryOthers && <span>• Solo</span>}
+                          {item.status === 'uploading' && (
+                            <span className="text-purple-400 font-semibold">• {item.progress}%</span>
+                          )}
                         </div>
 
                         {/* Progress Bar */}
                         {(item.status === 'uploading' || item.status === 'completed') && (
                           <div className="w-full bg-[#21262d] h-1.5 rounded-full overflow-hidden mt-1.5">
                             <div
-                              className={`h-full transition-all duration-200 ${
+                              className={`h-full transition-all duration-150 ${
                                 item.status === 'completed' ? 'bg-emerald-500' : 'bg-purple-600'
                               }`}
                               style={{ width: `${item.progress}%` }}
                             />
+                          </div>
+                        )}
+                        
+                        {/* Error Message */}
+                        {item.status === 'error' && (
+                          <div className="text-[11px] text-rose-400 mt-1 flex items-center space-x-1">
+                            <AlertCircle className="w-3 h-3 flex-shrink-0" />
+                            <span className="truncate">{item.errorMessage || 'Upload failed'}</span>
                           </div>
                         )}
                       </div>
@@ -396,39 +470,47 @@ export const BulkUploadModal: React.FC<BulkUploadModalProps> = ({
 
           {/* Footer */}
           <div className="px-5 py-3.5 bg-[#0d1117] border-t border-[#30363d] flex items-center justify-between">
+            {/* Cancel / Close button: NEVER disabled */}
             <button
               type="button"
-              onClick={onClose}
-              disabled={isUploading}
+              onClick={handleCancelOrClose}
               className="px-4 py-2 bg-[#21262d] hover:bg-[#30363d] text-gray-300 rounded-xl text-xs font-medium transition-colors"
             >
               {allCompleted ? 'Close' : 'Cancel'}
             </button>
 
-            {queue.length > 0 && !allCompleted && (
+            {/* If currently uploading, show Stop Upload button */}
+            {isUploading && (
+              <button
+                type="button"
+                onClick={handleStopUpload}
+                className="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-semibold flex items-center space-x-1.5 shadow-md transition-all"
+              >
+                <StopCircle className="w-4 h-4" />
+                <span>Stop Upload</span>
+              </button>
+            )}
+
+            {/* Upload All Button */}
+            {queue.length > 0 && !allCompleted && !isUploading && (
               <button
                 type="button"
                 onClick={handleStartUpload}
-                disabled={isUploading}
-                className="px-6 py-2.5 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white rounded-xl text-xs font-semibold flex items-center space-x-2 shadow-lg shadow-purple-600/30 transition-all"
+                className="px-6 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-semibold flex items-center space-x-2 shadow-lg shadow-purple-600/30 transition-all"
               >
                 <Upload className="w-4 h-4" />
-                <span>
-                  {isUploading
-                    ? `Uploading (${queue.filter(q => q.status === 'completed').length}/${queue.length})...`
-                    : `Upload All (${queue.length} files)`}
-                </span>
+                <span>Upload All ({queue.length} files)</span>
               </button>
             )}
 
             {allCompleted && (
               <button
                 type="button"
-                onClick={onClose}
+                onClick={handleCancelOrClose}
                 className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold flex items-center space-x-2 shadow-lg shadow-emerald-600/30"
               >
                 <CheckCircle2 className="w-4 h-4" />
-                <span>Done!</span>
+                <span>Done! ({completedCount} uploaded)</span>
               </button>
             )}
           </div>
