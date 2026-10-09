@@ -62,6 +62,7 @@ export const App: React.FC = () => {
 
     const unsubSounds = storageService.subscribeSounds((soundList) => {
       setSounds(soundList);
+      audioEngine.preloadSounds(soundList);
     });
 
     return () => {

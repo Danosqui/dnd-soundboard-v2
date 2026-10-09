@@ -1,10 +1,11 @@
 import { SoundItem, SoundPlaybackState } from '../types/sound';
 
-interface TrackInstance {
-  audio: HTMLAudioElement;
-  sourceNode: MediaElementAudioSourceNode;
+interface ActiveTrack {
+  source: AudioBufferSourceNode;
   gainNode: GainNode;
   sound: SoundItem;
+  startedAt: number;
+  duration: number;
 }
 
 type PlaybackListener = (states: Record<string, SoundPlaybackState>) => void;
@@ -16,11 +17,16 @@ class AudioEngine {
   private compressor: DynamicsCompressorNode | null = null;
   private compressorGain: GainNode | null = null;
   private bypassGain: GainNode | null = null;
-  
-  private tracks: Map<string, TrackInstance> = new Map();
+
+  // In-memory decoded PCM buffer cache (eliminates mobile network streaming jitter)
+  private bufferCache: Map<string, AudioBuffer> = new Map();
+  private pendingFetches: Map<string, Promise<AudioBuffer>> = new Map();
+
+  // Active playing sources
+  private activeTracks: Map<string, ActiveTrack> = new Map();
   private states: Record<string, SoundPlaybackState> = {};
   private listeners: Set<PlaybackListener> = new Set();
-  
+
   private isNormalizationEnabled: boolean = true;
   private masterVolume: number = 1.0;
   private progressIntervalId: number | null = null;
@@ -30,22 +36,22 @@ class AudioEngine {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       this.ctx = new AudioCtx();
 
-      // Master Gain (connected to speaker destination)
+      // Master Gain
       this.masterGain = this.ctx.createGain();
       this.masterGain.gain.setValueAtTime(this.masterVolume, this.ctx.currentTime);
       this.masterGain.connect(this.ctx.destination);
 
-      // Common Track Bus (all sound channels plug into this single bus)
+      // Main Track Bus (all sound sources route into this bus)
       this.tracksBus = this.ctx.createGain();
       this.tracksBus.gain.setValueAtTime(1.0, this.ctx.currentTime);
 
-      // Path A: Dynamics Compressor (smooth leveling limiter, tuned to prevent mobile speaker ducking)
+      // Path A: Dynamics Compressor (smooth leveler & anti-clipping limiter)
       this.compressor = this.ctx.createDynamicsCompressor();
-      this.compressor.threshold.setValueAtTime(-8, this.ctx.currentTime); // Gentle -8dB threshold (avoids extreme ducking)
-      this.compressor.knee.setValueAtTime(24, this.ctx.currentTime); // Soft transition knee curve
-      this.compressor.ratio.setValueAtTime(3, this.ctx.currentTime); // Musical 3:1 ratio instead of harsh 8:1
-      this.compressor.attack.setValueAtTime(0.015, this.ctx.currentTime); // 15ms attack protects transients
-      this.compressor.release.setValueAtTime(0.35, this.ctx.currentTime); // 350ms release prevents pumping
+      this.compressor.threshold.setValueAtTime(-8, this.ctx.currentTime);
+      this.compressor.knee.setValueAtTime(24, this.ctx.currentTime);
+      this.compressor.ratio.setValueAtTime(3, this.ctx.currentTime);
+      this.compressor.attack.setValueAtTime(0.015, this.ctx.currentTime);
+      this.compressor.release.setValueAtTime(0.35, this.ctx.currentTime);
 
       this.compressorGain = this.ctx.createGain();
       this.compressorGain.gain.setValueAtTime(this.isNormalizationEnabled ? 1.0 : 0.0, this.ctx.currentTime);
@@ -55,7 +61,7 @@ class AudioEngine {
       this.compressor.connect(this.compressorGain);
       this.compressorGain.connect(this.masterGain);
 
-      // Path B: Pure Bypass (raw original sound level, no compression)
+      // Path B: Pure Bypass (raw sound level, no compression)
       this.bypassGain = this.ctx.createGain();
       this.bypassGain.gain.setValueAtTime(this.isNormalizationEnabled ? 0.0 : 1.0, this.ctx.currentTime);
 
@@ -74,13 +80,11 @@ class AudioEngine {
   private updateNormalizationRouting() {
     if (!this.compressorGain || !this.bypassGain || !this.ctx) return;
     const now = this.ctx.currentTime;
-    
+
     if (this.isNormalizationEnabled) {
-      // Normalization ON: use compressor, silence bypass
       this.compressorGain.gain.setTargetAtTime(1.0, now, 0.02);
       this.bypassGain.gain.setTargetAtTime(0.0, now, 0.02);
     } else {
-      // Normalization OFF: raw sound level, silence compressor
       this.compressorGain.gain.setTargetAtTime(0.0, now, 0.02);
       this.bypassGain.gain.setTargetAtTime(1.0, now, 0.02);
     }
@@ -97,34 +101,76 @@ class AudioEngine {
   }
 
   /**
-   * Throttled progress update loop (200ms instead of 60-120fps RAF).
-   * Prevents WebKit IPC audio thread starvation and CPU thrashing on mobile devices.
+   * Preload and decode audio into in-memory AudioBuffer.
+   * Completely bypasses mobile network streaming hiccups.
    */
+  public async loadAudioBuffer(url: string): Promise<AudioBuffer> {
+    const cached = this.bufferCache.get(url);
+    if (cached) return cached;
+
+    const pending = this.pendingFetches.get(url);
+    if (pending) return pending;
+
+    const ctx = this.initContext();
+
+    const fetchPromise = (async () => {
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch audio file: ${response.statusText}`);
+        }
+        const arrayBuffer = await response.arrayBuffer();
+        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+        this.bufferCache.set(url, audioBuffer);
+        return audioBuffer;
+      } finally {
+        this.pendingFetches.delete(url);
+      }
+    })();
+
+    this.pendingFetches.set(url, fetchPromise);
+    return fetchPromise;
+  }
+
+  /**
+   * Preload a list of sounds in the background for zero-latency mobile playback.
+   */
+  public preloadSounds(sounds: SoundItem[]) {
+    sounds.forEach(s => {
+      if (s.fileUrl && !this.bufferCache.has(s.fileUrl)) {
+        this.loadAudioBuffer(s.fileUrl).catch(() => {});
+      }
+    });
+  }
+
   private startProgressLoop() {
     if (this.progressIntervalId !== null) return;
 
     this.progressIntervalId = window.setInterval(() => {
-      let hasPlaying = false;
-      this.tracks.forEach((track, id) => {
-        if (!track.audio.paused && !track.audio.ended) {
-          hasPlaying = true;
-          this.states[id] = {
-            isPlaying: true,
-            currentTime: track.audio.currentTime,
-            duration: track.audio.duration || track.sound.duration || 0,
-          };
-        }
-      });
-
-      if (hasPlaying) {
-        this.notify();
-      } else {
+      if (!this.ctx || this.activeTracks.size === 0) {
         if (this.progressIntervalId !== null) {
           clearInterval(this.progressIntervalId);
           this.progressIntervalId = null;
         }
         this.notify();
+        return;
       }
+
+      const now = this.ctx.currentTime;
+      this.activeTracks.forEach((track, id) => {
+        const elapsed = now - track.startedAt;
+        const current = track.sound.loop
+          ? (elapsed % track.duration)
+          : Math.min(track.duration, elapsed);
+
+        this.states[id] = {
+          isPlaying: true,
+          currentTime: current,
+          duration: track.duration,
+        };
+      });
+
+      this.notify();
     }, 200);
   }
 
@@ -139,86 +185,66 @@ class AudioEngine {
       }
     }
 
-    // Clicking a currently playing sound stops it
+    // Tapping a currently playing sound stops it
     if (this.isPlaying(sound.id)) {
       this.stop(sound.id);
       return;
     }
 
-    // If configured to stop other sounds in the same category
+    // Stop other sounds in the same category if configured
     if (sound.stopCategoryOthers) {
       this.stopCategory(sound.categoryId, allSoundsInBoard, sound.id);
     }
 
-    let track = this.tracks.get(sound.id);
+    try {
+      // Decode audio into PCM memory buffer (zero streaming dropouts on mobile)
+      const audioBuffer = await this.loadAudioBuffer(sound.fileUrl);
 
-    if (!track) {
-      const audio = new Audio();
-      audio.crossOrigin = 'anonymous';
-      audio.preload = 'auto';
-      // iOS Safari optimization: playsInline prevents media pipeline suspension
-      (audio as any).playsInline = true;
-      audio.src = sound.fileUrl;
-      audio.loop = sound.loop;
+      // Double-check if user stopped it while fetching
+      if (this.isPlaying(sound.id)) {
+        return;
+      }
 
-      const sourceNode = ctx.createMediaElementSource(audio);
+      // Create one-shot AudioBufferSourceNode
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.loop = sound.loop;
+
       const gainNode = ctx.createGain();
       gainNode.gain.setValueAtTime(sound.volume ?? 1.0, ctx.currentTime);
 
-      // Connect track gain into the common tracksBus
-      sourceNode.connect(gainNode).connect(this.tracksBus!);
+      // Connect: source -> gainNode -> tracksBus
+      source.connect(gainNode).connect(this.tracksBus!);
 
-      track = {
-        audio,
-        sourceNode,
-        gainNode,
-        sound,
+      const duration = audioBuffer.duration;
+      const startedAt = ctx.currentTime;
+
+      source.onended = () => {
+        if (!sound.loop) {
+          this.handleTrackEnded(sound.id);
+        }
       };
 
-      audio.addEventListener('ended', () => {
-        if (!audio.loop) {
-          this.states[sound.id] = {
-            isPlaying: false,
-            currentTime: 0,
-            duration: audio.duration || sound.duration || 0,
-          };
-          this.notify();
-        }
+      source.start(0);
+
+      this.activeTracks.set(sound.id, {
+        source,
+        gainNode,
+        sound,
+        startedAt,
+        duration,
       });
-
-      audio.addEventListener('error', (e) => {
-        console.error(`Audio error for sound ${sound.title}:`, e);
-        this.states[sound.id] = {
-          isPlaying: false,
-          currentTime: 0,
-          duration: 0,
-        };
-        this.notify();
-      });
-
-      this.tracks.set(sound.id, track);
-    } else {
-      track.sound = sound;
-      track.audio.loop = sound.loop;
-      track.gainNode.gain.setValueAtTime(sound.volume ?? 1.0, ctx.currentTime);
-      if (track.audio.src !== sound.fileUrl) {
-        track.audio.src = sound.fileUrl;
-      }
-    }
-
-    try {
-      track.audio.currentTime = 0;
-      await track.audio.play();
 
       this.states[sound.id] = {
         isPlaying: true,
         currentTime: 0,
-        duration: track.audio.duration || sound.duration || 0,
+        duration,
       };
+
       this.notify();
       this.startProgressLoop();
     } catch (err) {
-      console.error('Failed to play sound:', err);
+      console.error(`Failed to play sound '${sound.title}':`, err);
       this.states[sound.id] = {
         isPlaying: false,
         currentTime: 0,
@@ -228,21 +254,42 @@ class AudioEngine {
     }
   }
 
-  public stop(soundId: string) {
-    const track = this.tracks.get(soundId);
+  private handleTrackEnded(soundId: string) {
+    const track = this.activeTracks.get(soundId);
     if (track) {
       try {
-        track.audio.pause();
-        track.audio.currentTime = 0;
-      } catch (e) {
-        console.warn('Error pausing audio:', e);
-      }
+        track.source.disconnect();
+        track.gainNode.disconnect();
+      } catch {}
+      this.activeTracks.delete(soundId);
     }
 
     this.states[soundId] = {
       isPlaying: false,
       currentTime: 0,
-      duration: track?.audio.duration || track?.sound.duration || 0,
+      duration: track?.duration || 0,
+    };
+    this.notify();
+  }
+
+  public stop(soundId: string) {
+    const track = this.activeTracks.get(soundId);
+    if (track) {
+      try {
+        track.source.onended = null;
+        track.source.stop(0);
+        track.source.disconnect();
+        track.gainNode.disconnect();
+      } catch (e) {
+        console.warn('Error stopping track:', e);
+      }
+      this.activeTracks.delete(soundId);
+    }
+
+    this.states[soundId] = {
+      isPlaying: false,
+      currentTime: 0,
+      duration: track?.duration || 0,
     };
     this.notify();
   }
@@ -254,7 +301,7 @@ class AudioEngine {
         .map(s => s.id)
     );
 
-    this.tracks.forEach((track, id) => {
+    this.activeTracks.forEach((track, id) => {
       if (categorySoundIds.has(id) || (track.sound.categoryId === categoryId && id !== exceptSoundId)) {
         this.stop(id);
       }
@@ -262,19 +309,33 @@ class AudioEngine {
   }
 
   public stopAll() {
-    this.tracks.forEach((track, id) => {
+    this.activeTracks.forEach((track, id) => {
       try {
-        track.audio.pause();
-        track.audio.currentTime = 0;
+        track.source.onended = null;
+        track.source.stop(0);
+        track.source.disconnect();
+        track.gainNode.disconnect();
       } catch (e) {
         console.warn('Error stopping track:', e);
       }
-      this.states[id] = {
-        isPlaying: false,
-        currentTime: 0,
-        duration: track.audio.duration || track.sound.duration || 0,
-      };
     });
+    this.activeTracks.clear();
+
+    Object.keys(this.states).forEach(id => {
+      if (this.states[id]?.isPlaying) {
+        this.states[id] = {
+          ...this.states[id],
+          isPlaying: false,
+          currentTime: 0,
+        };
+      }
+    });
+
+    if (this.progressIntervalId !== null) {
+      clearInterval(this.progressIntervalId);
+      this.progressIntervalId = null;
+    }
+
     this.notify();
   }
 
@@ -287,7 +348,7 @@ class AudioEngine {
   }
 
   public setSoundVolume(soundId: string, volume: number) {
-    const track = this.tracks.get(soundId);
+    const track = this.activeTracks.get(soundId);
     if (track && this.ctx) {
       track.gainNode.gain.setValueAtTime(Math.max(0, Math.min(1, volume)), this.ctx.currentTime);
     }
