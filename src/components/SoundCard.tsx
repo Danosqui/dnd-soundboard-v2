@@ -11,7 +11,7 @@ interface SoundCardProps {
   onOpenSettings: (sound: SoundItem) => void;
 }
 
-export const SoundCard: React.FC<SoundCardProps> = ({
+export const SoundCard: React.FC<SoundCardProps> = React.memo(({
   sound,
   category,
   playbackState,
@@ -44,7 +44,7 @@ export const SoundCard: React.FC<SoundCardProps> = ({
       {/* Background progress fill if playing */}
       {isPlaying && (
         <div
-          className="absolute inset-y-0 left-0 bg-purple-600/15 transition-all duration-100 pointer-events-none"
+          className="absolute inset-y-0 left-0 bg-purple-600/15 transition-all duration-200 ease-linear pointer-events-none"
           style={{ width: `${progressPercent}%` }}
         />
       )}
@@ -143,11 +143,11 @@ export const SoundCard: React.FC<SoundCardProps> = ({
       {isPlaying && (
         <div className="w-full bg-[#161b22] h-1 overflow-hidden relative z-10">
           <div
-            className="bg-purple-500 h-full transition-all duration-100"
+            className="bg-purple-500 h-full transition-all duration-200 ease-linear"
             style={{ width: `${progressPercent}%` }}
           />
         </div>
       )}
     </div>
   );
-};
+});

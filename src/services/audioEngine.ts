@@ -23,7 +23,7 @@ class AudioEngine {
   
   private isNormalizationEnabled: boolean = true;
   private masterVolume: number = 1.0;
-  private animationFrameId: number | null = null;
+  private progressIntervalId: number | null = null;
 
   private initContext(): AudioContext {
     if (!this.ctx) {
@@ -39,13 +39,13 @@ class AudioEngine {
       this.tracksBus = this.ctx.createGain();
       this.tracksBus.gain.setValueAtTime(1.0, this.ctx.currentTime);
 
-      // Path A: Dynamics Compressor (for audio normalization & limiter)
+      // Path A: Dynamics Compressor (smooth leveling limiter, tuned to prevent mobile speaker ducking)
       this.compressor = this.ctx.createDynamicsCompressor();
-      this.compressor.threshold.setValueAtTime(-20, this.ctx.currentTime);
-      this.compressor.knee.setValueAtTime(12, this.ctx.currentTime);
-      this.compressor.ratio.setValueAtTime(8, this.ctx.currentTime);
-      this.compressor.attack.setValueAtTime(0.003, this.ctx.currentTime);
-      this.compressor.release.setValueAtTime(0.25, this.ctx.currentTime);
+      this.compressor.threshold.setValueAtTime(-8, this.ctx.currentTime); // Gentle -8dB threshold (avoids extreme ducking)
+      this.compressor.knee.setValueAtTime(24, this.ctx.currentTime); // Soft transition knee curve
+      this.compressor.ratio.setValueAtTime(3, this.ctx.currentTime); // Musical 3:1 ratio instead of harsh 8:1
+      this.compressor.attack.setValueAtTime(0.015, this.ctx.currentTime); // 15ms attack protects transients
+      this.compressor.release.setValueAtTime(0.35, this.ctx.currentTime); // 350ms release prevents pumping
 
       this.compressorGain = this.ctx.createGain();
       this.compressorGain.gain.setValueAtTime(this.isNormalizationEnabled ? 1.0 : 0.0, this.ctx.currentTime);
@@ -96,10 +96,14 @@ class AudioEngine {
     this.listeners.forEach(l => l({ ...this.states }));
   }
 
+  /**
+   * Throttled progress update loop (200ms instead of 60-120fps RAF).
+   * Prevents WebKit IPC audio thread starvation and CPU thrashing on mobile devices.
+   */
   private startProgressLoop() {
-    if (this.animationFrameId !== null) return;
+    if (this.progressIntervalId !== null) return;
 
-    const loop = () => {
+    this.progressIntervalId = window.setInterval(() => {
       let hasPlaying = false;
       this.tracks.forEach((track, id) => {
         if (!track.audio.paused && !track.audio.ended) {
@@ -114,18 +118,26 @@ class AudioEngine {
 
       if (hasPlaying) {
         this.notify();
-        this.animationFrameId = requestAnimationFrame(loop);
       } else {
-        this.animationFrameId = null;
+        if (this.progressIntervalId !== null) {
+          clearInterval(this.progressIntervalId);
+          this.progressIntervalId = null;
+        }
         this.notify();
       }
-    };
-
-    this.animationFrameId = requestAnimationFrame(loop);
+    }, 200);
   }
 
   public async play(sound: SoundItem, allSoundsInBoard: SoundItem[] = []): Promise<void> {
     const ctx = this.initContext();
+
+    if (ctx.state === 'suspended') {
+      try {
+        await ctx.resume();
+      } catch (e) {
+        console.warn('AudioContext resume failed:', e);
+      }
+    }
 
     // Clicking a currently playing sound stops it
     if (this.isPlaying(sound.id)) {
@@ -144,6 +156,8 @@ class AudioEngine {
       const audio = new Audio();
       audio.crossOrigin = 'anonymous';
       audio.preload = 'auto';
+      // iOS Safari optimization: playsInline prevents media pipeline suspension
+      (audio as any).playsInline = true;
       audio.src = sound.fileUrl;
       audio.loop = sound.loop;
 
