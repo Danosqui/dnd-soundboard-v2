@@ -5,7 +5,6 @@ interface TrackInstance {
   sourceNode: MediaElementAudioSourceNode;
   gainNode: GainNode;
   sound: SoundItem;
-  onEnded?: () => void;
 }
 
 type PlaybackListener = (states: Record<string, SoundPlaybackState>) => void;
@@ -13,7 +12,9 @@ type PlaybackListener = (states: Record<string, SoundPlaybackState>) => void;
 class AudioEngine {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
+  private tracksBus: GainNode | null = null;
   private compressor: DynamicsCompressorNode | null = null;
+  private compressorGain: GainNode | null = null;
   private bypassGain: GainNode | null = null;
   
   private tracks: Map<string, TrackInstance> = new Map();
@@ -29,26 +30,38 @@ class AudioEngine {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       this.ctx = new AudioCtx();
 
-      // Master Gain
+      // Master Gain (connected to speaker destination)
       this.masterGain = this.ctx.createGain();
       this.masterGain.gain.setValueAtTime(this.masterVolume, this.ctx.currentTime);
       this.masterGain.connect(this.ctx.destination);
 
-      // Dynamics Compressor (for audio normalization & anti-clipping limiter)
+      // Common Track Bus (all sound channels plug into this single bus)
+      this.tracksBus = this.ctx.createGain();
+      this.tracksBus.gain.setValueAtTime(1.0, this.ctx.currentTime);
+
+      // Path A: Dynamics Compressor (for audio normalization & limiter)
       this.compressor = this.ctx.createDynamicsCompressor();
       this.compressor.threshold.setValueAtTime(-20, this.ctx.currentTime);
       this.compressor.knee.setValueAtTime(12, this.ctx.currentTime);
       this.compressor.ratio.setValueAtTime(8, this.ctx.currentTime);
       this.compressor.attack.setValueAtTime(0.003, this.ctx.currentTime);
       this.compressor.release.setValueAtTime(0.25, this.ctx.currentTime);
-      this.compressor.connect(this.masterGain);
 
-      // Bypass gain (when normalization is turned off)
+      this.compressorGain = this.ctx.createGain();
+      this.compressorGain.gain.setValueAtTime(this.isNormalizationEnabled ? 1.0 : 0.0, this.ctx.currentTime);
+
+      // Wire Path A: tracksBus -> compressor -> compressorGain -> masterGain
+      this.tracksBus.connect(this.compressor);
+      this.compressor.connect(this.compressorGain);
+      this.compressorGain.connect(this.masterGain);
+
+      // Path B: Pure Bypass (raw original sound level, no compression)
       this.bypassGain = this.ctx.createGain();
-      this.bypassGain.gain.setValueAtTime(0, this.ctx.currentTime);
-      this.bypassGain.connect(this.masterGain);
+      this.bypassGain.gain.setValueAtTime(this.isNormalizationEnabled ? 0.0 : 1.0, this.ctx.currentTime);
 
-      this.updateNormalizationRouting();
+      // Wire Path B: tracksBus -> bypassGain -> masterGain
+      this.tracksBus.connect(this.bypassGain);
+      this.bypassGain.connect(this.masterGain);
     }
 
     if (this.ctx.state === 'suspended') {
@@ -59,22 +72,17 @@ class AudioEngine {
   }
 
   private updateNormalizationRouting() {
-    if (!this.compressor || !this.bypassGain || !this.ctx) return;
+    if (!this.compressorGain || !this.bypassGain || !this.ctx) return;
     const now = this.ctx.currentTime;
+    
     if (this.isNormalizationEnabled) {
-      this.compressor.connect(this.masterGain!);
-      try {
-        this.bypassGain.disconnect();
-      } catch {
-        // ignore if already disconnected
-      }
+      // Normalization ON: use compressor, silence bypass
+      this.compressorGain.gain.setTargetAtTime(1.0, now, 0.02);
+      this.bypassGain.gain.setTargetAtTime(0.0, now, 0.02);
     } else {
-      try {
-        this.compressor.disconnect();
-      } catch {
-        // ignore
-      }
-      this.bypassGain.connect(this.masterGain!);
+      // Normalization OFF: raw sound level, silence compressor
+      this.compressorGain.gain.setTargetAtTime(0.0, now, 0.02);
+      this.bypassGain.gain.setTargetAtTime(1.0, now, 0.02);
     }
   }
 
@@ -119,13 +127,13 @@ class AudioEngine {
   public async play(sound: SoundItem, allSoundsInBoard: SoundItem[] = []): Promise<void> {
     const ctx = this.initContext();
 
-    // Check if sound is already playing; if so, clicking it stops it (per requirement: 'when clicking on a playing sound, it must stop playing')
+    // Clicking a currently playing sound stops it
     if (this.isPlaying(sound.id)) {
       this.stop(sound.id);
       return;
     }
 
-    // If this sound has 'stop other sounds in same category when played' enabled:
+    // If configured to stop other sounds in the same category
     if (sound.stopCategoryOthers) {
       this.stopCategory(sound.categoryId, allSoundsInBoard, sound.id);
     }
@@ -143,14 +151,8 @@ class AudioEngine {
       const gainNode = ctx.createGain();
       gainNode.gain.setValueAtTime(sound.volume ?? 1.0, ctx.currentTime);
 
-      // Connect to compressor or bypass
-      if (this.isNormalizationEnabled && this.compressor) {
-        sourceNode.connect(gainNode).connect(this.compressor);
-      } else if (this.bypassGain) {
-        sourceNode.connect(gainNode).connect(this.bypassGain);
-      } else if (this.masterGain) {
-        sourceNode.connect(gainNode).connect(this.masterGain);
-      }
+      // Connect track gain into the common tracksBus
+      sourceNode.connect(gainNode).connect(this.tracksBus!);
 
       track = {
         audio,
@@ -182,7 +184,6 @@ class AudioEngine {
 
       this.tracks.set(sound.id, track);
     } else {
-      // update properties in case sound config changed
       track.sound = sound;
       track.audio.loop = sound.loop;
       track.gainNode.gain.setValueAtTime(sound.volume ?? 1.0, ctx.currentTime);
@@ -233,7 +234,6 @@ class AudioEngine {
   }
 
   public stopCategory(categoryId: string, allSoundsInBoard: SoundItem[], exceptSoundId?: string) {
-    // Find all sounds that belong to this category
     const categorySoundIds = new Set(
       allSoundsInBoard
         .filter(s => s.categoryId === categoryId && s.id !== exceptSoundId)

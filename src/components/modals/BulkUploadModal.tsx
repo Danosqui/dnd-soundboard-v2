@@ -224,7 +224,19 @@ export const BulkUploadModal: React.FC<BulkUploadModalProps> = ({
     if (isUploading) {
       handleStopUpload();
     }
+    // Remove completed items so they don't linger in queue on next open
+    setQueue((prev) => prev.filter((item) => item.status !== 'completed'));
     onClose();
+  };
+
+  const handleDone = () => {
+    setQueue([]);
+    onClose();
+  };
+
+  const handleClearQueue = () => {
+    if (isUploading) return;
+    setQueue([]);
   };
 
   const allCompleted = queue.length > 0 && queue.every((i) => i.status === 'completed');
@@ -386,7 +398,18 @@ export const BulkUploadModal: React.FC<BulkUploadModalProps> = ({
               <div className="space-y-2">
                 <div className="flex justify-between items-center text-xs text-gray-400 px-1">
                   <span>Queued Audio Files ({queue.length})</span>
-                  <span>{(queue.reduce((acc, i) => acc + i.file.size, 0) / (1024 * 1024)).toFixed(1)} MB total</span>
+                  <div className="flex items-center space-x-3">
+                    <span>{(queue.reduce((acc, i) => acc + i.file.size, 0) / (1024 * 1024)).toFixed(1)} MB total</span>
+                    {!isUploading && (
+                      <button
+                        type="button"
+                        onClick={handleClearQueue}
+                        className="text-purple-400 hover:text-purple-300 hover:underline text-[11px]"
+                      >
+                        Clear queue
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 <div className="max-h-60 overflow-y-auto space-y-2 pr-1">
@@ -506,7 +529,7 @@ export const BulkUploadModal: React.FC<BulkUploadModalProps> = ({
             {allCompleted && (
               <button
                 type="button"
-                onClick={handleCancelOrClose}
+                onClick={handleDone}
                 className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold flex items-center space-x-2 shadow-lg shadow-emerald-600/30"
               >
                 <CheckCircle2 className="w-4 h-4" />
