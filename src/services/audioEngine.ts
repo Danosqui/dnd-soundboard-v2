@@ -21,6 +21,9 @@ class AudioEngine {
   // In-memory decoded PCM buffer cache (eliminates mobile network streaming jitter)
   private bufferCache: Map<string, AudioBuffer> = new Map();
   private pendingFetches: Map<string, Promise<AudioBuffer>> = new Map();
+  // Background preloads run one at a time so decoding doesn't starve the audio thread
+  private preloadQueue: string[] = [];
+  private isPreloading: boolean = false;
 
   // Active playing sources
   private activeTracks: Map<string, ActiveTrack> = new Map();
@@ -34,7 +37,8 @@ class AudioEngine {
   private initContext(): AudioContext {
     if (!this.ctx) {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      this.ctx = new AudioCtx();
+      // 'playback' uses larger audio buffers: avoids underrun glitches on mobile CPUs
+      this.ctx = new AudioCtx({ latencyHint: 'playback' });
 
       // Master Gain
       this.masterGain = this.ctx.createGain();
@@ -137,10 +141,25 @@ class AudioEngine {
    */
   public preloadSounds(sounds: SoundItem[]) {
     sounds.forEach(s => {
-      if (s.fileUrl && !this.bufferCache.has(s.fileUrl)) {
-        this.loadAudioBuffer(s.fileUrl).catch(() => {});
+      if (s.fileUrl && !this.bufferCache.has(s.fileUrl) && !this.preloadQueue.includes(s.fileUrl)) {
+        this.preloadQueue.push(s.fileUrl);
       }
     });
+    this.drainPreloadQueue();
+  }
+
+  private async drainPreloadQueue() {
+    if (this.isPreloading) return;
+    this.isPreloading = true;
+    try {
+      let url: string | undefined;
+      while ((url = this.preloadQueue.shift())) {
+        if (this.bufferCache.has(url)) continue;
+        await this.loadAudioBuffer(url).catch(() => {});
+      }
+    } finally {
+      this.isPreloading = false;
+    }
   }
 
   private startProgressLoop() {
@@ -171,7 +190,7 @@ class AudioEngine {
       });
 
       this.notify();
-    }, 200);
+    }, 500);
   }
 
   public async play(sound: SoundItem, allSoundsInBoard: SoundItem[] = []): Promise<void> {

@@ -82,9 +82,9 @@ export const SoundCard: React.FC<SoundCardProps> = React.memo(({
             {isPlaying ? (
               <div className="flex items-center space-x-1 text-purple-400 text-xs font-mono">
                 <span className="flex space-x-0.5 items-end h-3 w-3">
-                  <span className="w-0.5 bg-purple-400 rounded-full animate-sound-wave" style={{ animationDelay: '0ms' }} />
-                  <span className="w-0.5 bg-purple-400 rounded-full animate-sound-wave" style={{ animationDelay: '200ms' }} />
-                  <span className="w-0.5 bg-purple-400 rounded-full animate-sound-wave" style={{ animationDelay: '400ms' }} />
+                  <span className="w-0.5 h-full origin-bottom bg-purple-400 rounded-full animate-sound-wave" style={{ animationDelay: '0ms' }} />
+                  <span className="w-0.5 h-full origin-bottom bg-purple-400 rounded-full animate-sound-wave" style={{ animationDelay: '200ms' }} />
+                  <span className="w-0.5 h-full origin-bottom bg-purple-400 rounded-full animate-sound-wave" style={{ animationDelay: '400ms' }} />
                 </span>
                 <span>
                   {formatTime(playbackState?.currentTime || 0)}

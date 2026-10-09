@@ -29,8 +29,8 @@ export default {
       },
       keyframes: {
         soundWave: {
-          '0%': { height: '20%' },
-          '100%': { height: '100%' },
+          '0%': { transform: 'scaleY(0.2)' },
+          '100%': { transform: 'scaleY(1)' },
         }
       }
     },
