@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { SoundItem, SoundCategory, SoundPlaybackState, AppSettings } from './types/sound';
 import { storageService } from './services/storageService';
 import { audioEngine } from './services/audioEngine';
-import { initFirebase, getStoredFirebaseConfig } from './services/firebase';
+import { initSupabase } from './services/supabase';
 import { createDemoSoundBlob } from './utils/audioSynthesizer';
 
 import { TopHeader } from './components/TopHeader';
@@ -46,9 +46,9 @@ export const App: React.FC = () => {
   // Generating demo status
   const [isGeneratingDemo, setIsGeneratingDemo] = useState(false);
 
-  // Initialize Firebase and AudioEngine settings on mount
+  // Initialize Supabase and AudioEngine settings on mount
   useEffect(() => {
-    initFirebase();
+    initSupabase();
     audioEngine.setMasterVolume(masterVolume);
     audioEngine.setNormalization(isNormalized);
 
@@ -274,7 +274,7 @@ export const App: React.FC = () => {
                 className="text-purple-400 hover:underline font-medium inline-flex items-center space-x-1"
               >
                 <Cloud className="w-3 h-3 inline" />
-                <span>Configure Firebase</span>
+                <span>Connect Free Cloud (Supabase)</span>
               </button>
             </div>
 
@@ -326,7 +326,7 @@ export const App: React.FC = () => {
         settings={settings}
         onClose={() => setIsSettingsOpen(false)}
         onUpdateSettings={setSettings}
-        onFirebaseConfigChanged={() => {
+        onBackendConfigChanged={() => {
           // Re-subscribe with new config
           storageService.subscribeCategories(setCategories);
           storageService.subscribeSounds(setSounds);

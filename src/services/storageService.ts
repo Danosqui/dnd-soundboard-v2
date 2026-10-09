@@ -1,20 +1,5 @@
-import { 
-  collection, 
-  doc, 
-  setDoc, 
-  deleteDoc, 
-  onSnapshot, 
-  query, 
-  orderBy 
-} from 'firebase/firestore';
-import { 
-  ref, 
-  uploadBytesResumable, 
-  getDownloadURL, 
-  deleteObject 
-} from 'firebase/storage';
 import { SoundItem, SoundCategory, AppSettings } from '../types/sound';
-import { getFirebaseInstances } from './firebase';
+import { getSupabaseInstances } from './supabase';
 import { localDb, DEFAULT_CATEGORIES } from './localDb';
 
 export interface UploadProgressCallback {
@@ -22,6 +7,65 @@ export interface UploadProgressCallback {
 }
 
 const SETTINGS_KEY = 'dnd_soundboard_settings';
+
+// Helper to convert DB row to SoundItem
+function mapSoundRowToItem(row: any): SoundItem {
+  return {
+    id: row.id,
+    title: row.title,
+    categoryId: row.category_id || row.categoryId,
+    fileUrl: row.file_url || row.fileUrl,
+    storagePath: row.storage_path || row.storagePath,
+    duration: row.duration || 0,
+    loop: !!row.loop,
+    stopCategoryOthers: row.stop_category_others ?? row.stopCategoryOthers ?? true,
+    icon: row.icon || 'Volume2',
+    volume: row.volume ?? 1.0,
+    order: row.order ?? 0,
+    createdAt: row.created_at || row.createdAt || Date.now(),
+  };
+}
+
+// Helper to convert SoundItem to DB row
+function mapSoundItemToRow(item: SoundItem) {
+  return {
+    id: item.id,
+    title: item.title,
+    category_id: item.categoryId,
+    file_url: item.fileUrl,
+    storage_path: item.storagePath,
+    duration: item.duration || 0,
+    loop: item.loop,
+    stop_category_others: item.stopCategoryOthers,
+    icon: item.icon,
+    volume: item.volume ?? 1.0,
+    order: item.order ?? 0,
+    created_at: item.createdAt || Date.now(),
+  };
+}
+
+// Helper to convert DB row to SoundCategory
+function mapCategoryRowToItem(row: any): SoundCategory {
+  return {
+    id: row.id,
+    name: row.name,
+    icon: row.icon || 'FolderPlus',
+    color: row.color || 'purple',
+    order: row.order ?? 0,
+    createdAt: row.created_at || row.createdAt || Date.now(),
+  };
+}
+
+function mapCategoryItemToRow(cat: SoundCategory) {
+  return {
+    id: cat.id,
+    name: cat.name,
+    icon: cat.icon,
+    color: cat.color,
+    order: cat.order,
+    created_at: cat.createdAt,
+  };
+}
 
 export const storageService = {
   getSettings(): AppSettings {
@@ -44,59 +88,101 @@ export const storageService = {
 
   // Category subscriptions
   subscribeCategories(callback: (categories: SoundCategory[]) => void): () => void {
-    const { db, isConfigured } = getFirebaseInstances();
+    const { client, isConfigured } = getSupabaseInstances();
 
-    if (isConfigured && db) {
-      const q = query(collection(db, 'categories'), orderBy('order', 'asc'));
-      const unsubscribe = onSnapshot(q, (snapshot) => {
-        if (snapshot.empty) {
-          // If Firestore categories collection is empty, seed with defaults!
-          DEFAULT_CATEGORIES.forEach(cat => {
-            setDoc(doc(db, 'categories', cat.id), cat).catch(() => {});
-          });
-          callback(DEFAULT_CATEGORIES);
-        } else {
-          const list: SoundCategory[] = [];
-          snapshot.forEach(docSnap => list.push(docSnap.data() as SoundCategory));
-          callback(list);
+    if (isConfigured && client) {
+      const fetchCategories = async () => {
+        try {
+          const { data, error } = await client
+            .from('categories')
+            .select('*')
+            .order('order', { ascending: true });
+
+          if (error) throw error;
+
+          if (!data || data.length === 0) {
+            // Seed defaults into Supabase
+            const rows = DEFAULT_CATEGORIES.map(mapCategoryItemToRow);
+            await client.from('categories').upsert(rows);
+            callback(DEFAULT_CATEGORIES);
+          } else {
+            callback(data.map(mapCategoryRowToItem));
+          }
+        } catch (err) {
+          console.error('Supabase categories fetch failed, falling back to localDb:', err);
+          localDb.getCategories().then(callback);
         }
-      }, (error) => {
-        console.error('Firestore categories snapshot error, falling back to localDb:', error);
-        localDb.getCategories().then(callback);
-      });
-      return unsubscribe;
+      };
+
+      fetchCategories();
+
+      // Realtime subscription
+      const channel = client
+        .channel('categories_realtime')
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'categories' },
+          () => {
+            fetchCategories();
+          }
+        )
+        .subscribe();
+
+      return () => {
+        client.removeChannel(channel);
+      };
     } else {
       // Local fallback with immediate fetch + event-based subscription
       localDb.getCategories().then(callback);
-      const unsub = localDb.subscribeCategories(() => {
+      return localDb.subscribeCategories(() => {
         localDb.getCategories().then(callback);
       });
-      return unsub;
     }
   },
 
   // Sound subscriptions
   subscribeSounds(callback: (sounds: SoundItem[]) => void): () => void {
-    const { db, isConfigured } = getFirebaseInstances();
+    const { client, isConfigured } = getSupabaseInstances();
 
-    if (isConfigured && db) {
-      const q = query(collection(db, 'sounds'), orderBy('order', 'asc'));
-      const unsubscribe = onSnapshot(q, (snapshot) => {
-        const list: SoundItem[] = [];
-        snapshot.forEach(docSnap => list.push(docSnap.data() as SoundItem));
-        callback(list);
-      }, (error) => {
-        console.error('Firestore sounds snapshot error, falling back to localDb:', error);
-        localDb.getSounds().then(callback);
-      });
-      return unsubscribe;
+    if (isConfigured && client) {
+      const fetchSounds = async () => {
+        try {
+          const { data, error } = await client
+            .from('sounds')
+            .select('*')
+            .order('order', { ascending: true });
+
+          if (error) throw error;
+          callback((data || []).map(mapSoundRowToItem));
+        } catch (err) {
+          console.error('Supabase sounds fetch failed, falling back to localDb:', err);
+          localDb.getSounds().then(callback);
+        }
+      };
+
+      fetchSounds();
+
+      // Realtime subscription
+      const channel = client
+        .channel('sounds_realtime')
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'sounds' },
+          () => {
+            fetchSounds();
+          }
+        )
+        .subscribe();
+
+      return () => {
+        client.removeChannel(channel);
+      };
     } else {
       // Local fallback with immediate fetch + event-based subscription
       localDb.getSounds().then(callback);
-      const unsub = localDb.subscribeSounds(() => {
+      return localDb.subscribeSounds(() => {
         localDb.getSounds().then(callback);
       });
-      return unsub;
     }
   },
 
@@ -107,58 +193,43 @@ export const storageService = {
     onProgress?: UploadProgressCallback,
     abortSignal?: AbortSignal
   ): Promise<SoundItem> {
-    const { db, storage, isConfigured } = getFirebaseInstances();
+    const { client, isConfigured } = getSupabaseInstances();
     const soundId = soundData.id || `sound_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
-    let downloadUrl = '';
-    let storagePath = '';
+    if (isConfigured && client) {
+      if (onProgress) onProgress(10);
 
-    if (isConfigured && storage && db) {
-      if (onProgress) onProgress(5);
-      // Clean filename
-      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-      storagePath = `sounds/${soundId}/${safeName}`;
-      const fileRef = ref(storage, storagePath);
+      // Clean file name
+      const fileExt = file.name.split('.').pop() || 'mp3';
+      const safeName = `${soundId}.${fileExt}`;
+      const storagePath = `audio/${safeName}`;
 
-      const uploadTask = uploadBytesResumable(fileRef, file);
-
-      // Handle abort signal
-      if (abortSignal) {
-        abortSignal.addEventListener('abort', () => {
-          uploadTask.cancel();
-        });
+      if (abortSignal?.aborted) {
+        throw new Error('Upload cancelled');
       }
 
-      await new Promise<void>((resolve, reject) => {
-        // 25 second timeout safeguard so Firebase never hangs indefinitely
-        const timeout = setTimeout(() => {
-          uploadTask.cancel();
-          reject(new Error('Firebase upload timed out (25s). Check internet connection, CORS, or Firebase Storage rules.'));
-        }, 25000);
+      // Upload file to Supabase Storage bucket 'sounds'
+      if (onProgress) onProgress(30);
+      const { data: uploadData, error: uploadError } = await client.storage
+        .from('sounds')
+        .upload(storagePath, file, {
+          cacheControl: '3600',
+          upsert: true,
+        });
 
-        uploadTask.on(
-          'state_changed',
-          (snapshot) => {
-            const rawProgress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
-            // Smooth progress
-            if (onProgress) onProgress(Math.min(95, Math.max(10, Math.round(rawProgress))));
-          },
-          (error) => {
-            clearTimeout(timeout);
-            reject(error);
-          },
-          async () => {
-            clearTimeout(timeout);
-            try {
-              downloadUrl = await getDownloadURL(uploadTask.snapshot.ref);
-              if (onProgress) onProgress(98);
-              resolve();
-            } catch (err) {
-              reject(err);
-            }
-          }
-        );
-      });
+      if (uploadError) {
+        console.error('Supabase storage upload error:', uploadError);
+        throw new Error(`Storage upload error: ${uploadError.message}. (Did you create the 'sounds' bucket in Supabase?)`);
+      }
+
+      if (onProgress) onProgress(75);
+
+      // Get public URL
+      const { data: urlData } = client.storage
+        .from('sounds')
+        .getPublicUrl(storagePath);
+
+      const downloadUrl = urlData.publicUrl;
 
       const newSound: SoundItem = {
         id: soundId,
@@ -174,7 +245,17 @@ export const storageService = {
         createdAt: Date.now(),
       };
 
-      await setDoc(doc(db, 'sounds', soundId), newSound);
+      // Save row to public.sounds table
+      if (onProgress) onProgress(90);
+      const { error: dbError } = await client
+        .from('sounds')
+        .upsert([mapSoundItemToRow(newSound)]);
+
+      if (dbError) {
+        console.error('Supabase DB error saving sound:', dbError);
+        throw new Error(`Database error: ${dbError.message}. (Did you create the 'sounds' table in Supabase?)`);
+      }
+
       if (onProgress) onProgress(100);
       return newSound;
     } else {
@@ -189,7 +270,7 @@ export const storageService = {
       if (onProgress) onProgress(65);
 
       const objectUrl = URL.createObjectURL(file);
-      storagePath = `local://${soundId}`;
+      const storagePath = `local://${soundId}`;
 
       const newSound: SoundItem = {
         id: soundId,
@@ -213,9 +294,9 @@ export const storageService = {
 
   // Save or update sound metadata
   async saveSound(sound: SoundItem): Promise<void> {
-    const { db, isConfigured } = getFirebaseInstances();
-    if (isConfigured && db) {
-      await setDoc(doc(db, 'sounds', sound.id), sound);
+    const { client, isConfigured } = getSupabaseInstances();
+    if (isConfigured && client) {
+      await client.from('sounds').upsert([mapSoundItemToRow(sound)]);
     } else {
       await localDb.saveSound(sound);
     }
@@ -223,17 +304,16 @@ export const storageService = {
 
   // Delete sound
   async deleteSound(sound: SoundItem): Promise<void> {
-    const { db, storage, isConfigured } = getFirebaseInstances();
-    if (isConfigured && db && storage) {
+    const { client, isConfigured } = getSupabaseInstances();
+    if (isConfigured && client) {
       try {
         if (sound.storagePath && !sound.storagePath.startsWith('local://')) {
-          const fileRef = ref(storage, sound.storagePath);
-          await deleteObject(fileRef).catch(() => {});
+          await client.storage.from('sounds').remove([sound.storagePath]);
         }
       } catch (err) {
-        console.warn('Could not delete storage file:', err);
+        console.warn('Could not delete storage file from Supabase:', err);
       }
-      await deleteDoc(doc(db, 'sounds', sound.id));
+      await client.from('sounds').delete().eq('id', sound.id);
     } else {
       if (sound.storagePath && sound.storagePath.startsWith('local://')) {
         const blobId = sound.storagePath.replace('local://', '');
@@ -245,9 +325,9 @@ export const storageService = {
 
   // Save or update category
   async saveCategory(category: SoundCategory): Promise<void> {
-    const { db, isConfigured } = getFirebaseInstances();
-    if (isConfigured && db) {
-      await setDoc(doc(db, 'categories', category.id), category);
+    const { client, isConfigured } = getSupabaseInstances();
+    if (isConfigured && client) {
+      await client.from('categories').upsert([mapCategoryItemToRow(category)]);
     } else {
       await localDb.saveCategory(category);
     }
@@ -255,9 +335,9 @@ export const storageService = {
 
   // Delete category
   async deleteCategory(categoryId: string): Promise<void> {
-    const { db, isConfigured } = getFirebaseInstances();
-    if (isConfigured && db) {
-      await deleteDoc(doc(db, 'categories', categoryId));
+    const { client, isConfigured } = getSupabaseInstances();
+    if (isConfigured && client) {
+      await client.from('categories').delete().eq('id', categoryId);
     } else {
       await localDb.deleteCategory(categoryId);
     }

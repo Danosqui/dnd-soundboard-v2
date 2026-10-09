@@ -1,6 +1,6 @@
 # 🎲 Bard's Deck — D&D Soundboard v2
 
-A high-performance, mobile-first soundboard designed for Dungeon Masters and tabletop RPG players. Built with **React**, **TypeScript**, **Tailwind CSS**, **Web Audio API**, and **Firebase** (with local IndexedDB fallback).
+A high-performance, mobile-first soundboard designed for Dungeon Masters and tabletop RPG players. Built with **React**, **TypeScript**, **Tailwind CSS**, **Web Audio API**, and **Supabase** (100% Free Cloud Storage & Database with **NO Credit Card Required**).
 
 Upload ambient tracks, music, and one-shot sound effects on your PC, then run sessions smoothly from your smartphone.
 
@@ -28,55 +28,82 @@ Upload ambient tracks, music, and one-shot sound effects on your PC, then run se
 
 ---
 
-## ☁️ Cloud & 24/7 Availability (Firebase Free Tier)
+## ☁️ 100% Free Cloud Setup (Supabase - No Credit Card Needed)
 
-All audio files and soundboard metadata can be stored in **Firebase Cloud** (5 GB free storage, Firestore database, 24/7 availability with zero project sleep/pausing).
+Supabase gives you **1 GB of free cloud audio storage** and a real-time database available 24/7 without asking for any credit card or payment information.
 
-### Step 1: Create a Free Firebase Project
-1. Go to [Firebase Console](https://console.firebase.google.com/) and click **Add project**.
-2. Name your project (e.g., `dnd-soundboard`) and create it (Google Analytics is optional).
+### Step 1: Create Your Free Supabase Account
+1. Open your browser and go to [https://supabase.com](https://supabase.com).
+2. Click **Start your project**.
+3. Sign in using your **GitHub account** or type your **Email**. *(No credit card is ever asked).*
+4. Click **New project**.
+5. Give your project a name (for example: `dnd-soundboard`) and create a database password.
+6. Click **Create new project** and wait about 1-2 minutes for it to finish setting up.
 
-### Step 2: Enable Cloud Firestore
-1. In the sidebar, go to **Build** → **Firestore Database** → **Create database**.
-2. Select your closest location and choose **Test mode** (or paste the rules below).
+### Step 2: Run the Setup Script
+1. On the left sidebar menu of your Supabase dashboard, click the **SQL Editor** icon (looks like `>_` or SQL terminal).
+2. Click **New query** (or the green `+` button).
+3. Copy and paste the following SQL script into the query box:
 
-### Step 3: Enable Firebase Storage
-1. In the sidebar, go to **Build** → **Storage** → **Get started**.
-2. Select **Test mode** and finish.
+```sql
+-- 1. Create Sounds Table
+create table if not exists public.sounds (
+  id text primary key,
+  title text not null,
+  category_id text not null,
+  file_url text not null,
+  storage_path text not null,
+  duration numeric default 0,
+  loop boolean default false,
+  stop_category_others boolean default true,
+  icon text default 'Volume2',
+  volume numeric default 1.0,
+  "order" numeric default 0,
+  created_at numeric default 0
+);
 
-### Step 4: Set Security Rules
-In **Firestore Database** → **Rules**, paste:
-```javascript
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /{document=**} {
-      allow read, write: if true;
-    }
-  }
-}
+-- 2. Create Categories Table
+create table if not exists public.categories (
+  id text primary key,
+  name text not null,
+  icon text default 'FolderPlus',
+  color text default 'purple',
+  "order" numeric default 0,
+  created_at numeric default 0
+);
+
+-- 3. Enable Public Access for personal soundboard (Row Level Security disabled)
+alter table public.sounds disable row level security;
+alter table public.categories disable row level security;
+
+-- 4. Enable Realtime on both tables
+alter publication supabase_realtime add table public.sounds;
+alter publication supabase_realtime add table public.categories;
+
+-- 5. Create Public Audio Storage Bucket 'sounds'
+insert into storage.buckets (id, name, public)
+values ('sounds', 'sounds', true)
+on conflict (id) do update set public = true;
+
+-- 6. Storage Security Policies for sound uploads
+create policy "Allow Public Select" on storage.objects for select using (bucket_id = 'sounds');
+create policy "Allow Public Insert" on storage.objects for insert with check (bucket_id = 'sounds');
+create policy "Allow Public Update" on storage.objects for update using (bucket_id = 'sounds');
+create policy "Allow Public Delete" on storage.objects for delete using (bucket_id = 'sounds');
 ```
 
-In **Storage** → **Rules**, paste:
-```javascript
-rules_version = '2';
-service firebase.storage {
-  match /b/{bucket}/o {
-    match /{allPaths=**} {
-      allow read, write: if true;
-    }
-  }
-}
-```
+4. Click the green **Run** button at the bottom right. You will see `Success. No rows returned`.
 
-### Step 5: Connect to the App
-1. Go to **Project Settings** (gear icon) → **General** → **Your apps** → Click the Web `</>` icon.
-2. Register the app (no need to check Firebase Hosting unless desired).
-3. Copy the `firebaseConfig` object and either:
-   - **Option A (In-App)**: Open the soundboard, tap the **Settings** gear, and paste the config snippet into the **Quick Paste** box.
-   - **Option B (.env)**: Create a `.env` file in the project root based on `.env.example`.
+### Step 3: Connect to the Soundboard App
+1. On the left sidebar of Supabase, click the **Project Settings** gear icon at the very bottom.
+2. Click **API** in the settings menu.
+3. You will see:
+   - **Project URL** (looks like `https://abcdefghijklm.supabase.co`)
+   - **Project API Keys** → find the one that says **`anon` `public`**.
+4. Open the Soundboard app in your browser, click the **Settings ⚙️** icon in the top right corner.
+5. Paste your **Project URL** and **Project API Key (anon)** into the boxes and click **Save Supabase Config**.
 
-> **Note**: If Firebase is not configured yet, the soundboard runs in **Local / Offline Mode** using browser IndexedDB storage and includes a **"Generate Demo Sounds"** button so you can test audio playback, loops, and normalization immediately.
+Done! Your soundboard is now connected to the cloud 24/7. Any sounds you upload on your PC will immediately sync to your phone!
 
 ---
 
@@ -90,26 +117,4 @@ npm install
 npm run dev
 ```
 
-During development, Vite listens on `0.0.0.0:5173`. You can open `http://<your-pc-ip>:5173` on your smartphone's browser (while connected to the same Wi-Fi) to test the mobile experience live!
-
----
-
-## 🌐 24/7 Free Cloud Deployment
-
-To access the soundboard anytime, anywhere without keeping your PC running:
-
-### Option 1: Vercel (Recommended)
-1. Push this repository to GitHub.
-2. Go to [Vercel](https://vercel.com/) and click **Add New Project**.
-3. Select this repository and click **Deploy**.
-4. (Optional) Add your Firebase environment variables under **Project Settings → Environment Variables**.
-
-### Option 2: Firebase Hosting
-```bash
-npm install -g firebase-tools
-firebase login
-firebase init hosting
-# Select dist as public directory, configure as single-page app
-npm run build
-firebase deploy --only hosting
-```
+During development, Vite listens on `0.0.0.0:5173`. Open `http://<your-pc-ip>:5173` on your smartphone browser (connected to the same Wi-Fi) to use it from your phone.
