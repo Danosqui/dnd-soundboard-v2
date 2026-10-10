@@ -103,6 +103,8 @@ class AudioEngine {
       // Wire Path B: tracksBus -> bypassGain -> highPassFilter
       this.tracksBus.connect(this.bypassGain);
       this.bypassGain.connect(this.highPassFilter);
+      this.tracksBus.disconnect();
+      this.tracksBus.connect(this.ctx.destination);
     }
 
     if (this.ctx.state !== 'running') {
