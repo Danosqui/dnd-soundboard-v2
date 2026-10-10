@@ -1,76 +1,31 @@
-import React from 'react';
-import {
-  Sword,
-  Swords,
-  Shield,
-  ShieldAlert,
-  ShieldCheck,
-  Sparkles,
-  Wand2,
-  Skull,
-  Ghost,
-  Flame,
-  FlameKindling,
-  Zap,
-  CloudRain,
-  CloudLightning,
-  CloudSnow,
-  Wind,
-  Trees,
-  Waves,
-  Beer,
-  Wine,
-  Coins,
-  Key,
-  Scroll,
-  BookOpen,
-  Crown,
-  Dices,
-  Bell,
-  Axe,
-  Hammer,
-  Crosshair,
-  Target,
-  Bomb,
-  Footprints,
-  Eye,
-  Feather,
-  Gem,
-  Tent,
-  Mountain,
-  Droplets,
-  Utensils,
-  DoorOpen,
-  Hourglass,
-  Clock,
-  Bug,
-  Cat,
-  Bird,
-  Fish,
-  Rat,
-  Bone,
-  Biohazard,
-  HeartPulse,
-  AlertTriangle,
-  Music,
-  Volume2,
-  Disc,
-  AudioLines,
-  Radio,
-  Compass,
-  MapPin,
-  Lock,
-  Unlock,
-  Moon,
-  Sun,
-  Activity,
-  LucideIcon
-} from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import * as Lucide from 'lucide-react';
+import { Volume2 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
+import type { IconType } from 'react-icons';
+
+/*
+ * Requiere: npm i react-icons
+ *
+ * - Lucide: TODOS los iconos (carga sincrónica, mismos nombres que antes: 'Sword', 'Wand2', etc.)
+ * - Game Icons (react-icons/gi): ~4000 iconos de fantasía/RPG, carga lazy.
+ *   Sus nombres empiezan con "Gi" (ej: 'GiCrossedSwords'), así que no chocan con Lucide
+ *   y lo que ya tengas guardado sigue funcionando.
+ */
+
+export interface IconEntry {
+  name: string;
+  label: string;
+}
 
 export interface IconCategoryGroup {
   name: string;
-  icons: { name: string; label: string }[];
+  icons: IconEntry[];
 }
+
+/* ------------------------------------------------------------------ */
+/* Categorías curadas (las originales, para Lucide)                    */
+/* ------------------------------------------------------------------ */
 
 export const ICON_CATEGORIES: IconCategoryGroup[] = [
   {
@@ -169,72 +124,150 @@ export const ICON_CATEGORIES: IconCategoryGroup[] = [
   },
 ];
 
-export const ICON_MAP: Record<string, LucideIcon> = {
-  Sword,
-  Swords,
-  Shield,
-  ShieldAlert,
-  ShieldCheck,
-  Sparkles,
-  Wand2,
-  Skull,
-  Ghost,
-  Flame,
-  FlameKindling,
-  Zap,
-  CloudRain,
-  CloudLightning,
-  CloudSnow,
-  Wind,
-  Trees,
-  Waves,
-  Beer,
-  Wine,
-  Coins,
-  Key,
-  Scroll,
-  BookOpen,
-  Crown,
-  Dices,
-  Bell,
-  Axe,
-  Hammer,
-  Crosshair,
-  Target,
-  Bomb,
-  Footprints,
-  Eye,
-  Feather,
-  Gem,
-  Tent,
-  Mountain,
-  Droplets,
-  Utensils,
-  DoorOpen,
-  Hourglass,
-  Clock,
-  Bug,
-  Cat,
-  Bird,
-  Fish,
-  Rat,
-  Bone,
-  Biohazard,
-  HeartPulse,
-  AlertTriangle,
-  Music,
-  Volume2,
-  Disc,
-  AudioLines,
-  Radio,
-  Compass,
-  MapPin,
-  Lock,
-  Unlock,
-  Moon,
-  Sun,
-  Activity,
+/* ------------------------------------------------------------------ */
+/* Lucide: todos los iconos                                            */
+/* ------------------------------------------------------------------ */
+
+// Filtra los exports que no son iconos (createLucideIcon, aliases "XxxIcon", "LucideXxx", etc.)
+export const ICON_MAP: Record<string, LucideIcon> = Object.fromEntries(
+  Object.entries(Lucide).filter(
+    ([key, value]) =>
+      /^[A-Z]/.test(key) &&
+      !/Icon$/.test(key) &&
+      !key.startsWith('Lucide') &&
+      (typeof value === 'object' || typeof value === 'function')
+  )
+) as Record<string, LucideIcon>;
+
+/** "CloudLightning" -> "Cloud Lightning"; "GiCrossedSwords" -> "Crossed Swords" */
+export const prettyLabel = (name: string): string =>
+  name
+    .replace(/^Gi(?=[A-Z])/, '')
+    .replace(/([a-z])([A-Z0-9])/g, '$1 $2')
+    .replace(/([0-9])([A-Z])/g, '$1 $2');
+
+let lucideCatalog: IconEntry[] | null = null;
+/** Lista de TODOS los iconos de Lucide (nombre + label), ordenada alfabéticamente. */
+export const getLucideCatalog = (): IconEntry[] => {
+  if (!lucideCatalog) {
+    lucideCatalog = Object.keys(ICON_MAP)
+      .sort()
+      .map((name) => ({ name, label: prettyLabel(name) }));
+  }
+  return lucideCatalog;
 };
+
+/* ------------------------------------------------------------------ */
+/* Game Icons (react-icons/gi): carga lazy                             */
+/* ------------------------------------------------------------------ */
+
+type GiRecord = Record<string, IconType>;
+
+let giCache: GiRecord | null = null;
+let giPromise: Promise<GiRecord> | null = null;
+
+export const loadGiIcons = (): Promise<GiRecord> => {
+  if (giCache) return Promise.resolve(giCache);
+  if (!giPromise) {
+    giPromise = import('react-icons/gi').then((mod) => {
+      const { default: _ignored, ...rest } = mod as unknown as Record<string, unknown>;
+      giCache = rest as GiRecord;
+      return giCache;
+    });
+  }
+  return giPromise;
+};
+
+/** Devuelve el set de Game Icons (null mientras carga). Con enabled=false no dispara la carga. */
+export const useGiIcons = (enabled = true): GiRecord | null => {
+  const [gi, setGi] = useState<GiRecord | null>(giCache);
+  useEffect(() => {
+    if (giCache) {
+      setGi(giCache);
+      return;
+    }
+    if (!enabled) return;
+    let alive = true;
+    loadGiIcons().then((icons) => alive && setGi(icons));
+    return () => {
+      alive = false;
+    };
+  }, [enabled]);
+  return gi;
+};
+
+/** Lista de TODOS los Game Icons. Pasale el resultado de useGiIcons(). */
+export const getGiCatalog = (gi: GiRecord | null): IconEntry[] =>
+  gi
+    ? Object.keys(gi)
+        .filter((k) => /^Gi[A-Z0-9]/.test(k))
+        .sort()
+        .map((name) => ({ name, label: prettyLabel(name) }))
+    : [];
+
+// Categorías curadas de Game Icons. Los nombres que no existan en tu versión se descartan solos.
+const GI_CATEGORY_NAMES: Record<string, string[]> = {
+  'RPG · Combate': [
+    'GiCrossedSwords', 'GiBroadsword', 'GiBattleAxe', 'GiMaceHead', 'GiDaggers', 'GiCrossbow',
+    'GiBowman', 'GiShield', 'GiCheckedShield', 'GiArrowhead', 'GiSpearHook', 'GiAxeSword',
+    'GiPunch', 'GiSkullCrossedBones', 'GiBloodySword', 'GiHeavyArrow',
+  ],
+  'RPG · Magia': [
+    'GiMagicSwirl', 'GiMagicPortal', 'GiFireBowl', 'GiFireball', 'GiLightningTrio', 'GiSpellBook',
+    'GiWizardStaff', 'GiCrystalBall', 'GiPotionBall', 'GiPentacle', 'GiRuneStone', 'GiMagicLamp',
+    'GiHolySymbol', 'GiAngelWings', 'GiBurningSkull', 'GiIceBolt',
+  ],
+  'RPG · Monstruos': [
+    'GiDragonHead', 'GiDragonBreath', 'GiSkeleton', 'GiZombieHand', 'GiGhost', 'GiWolfHowl',
+    'GiSpiderWeb', 'GiGoblinHead', 'GiOrcHead', 'GiDevilMask', 'GiCrow', 'GiBatWing',
+    'GiTrollHead', 'GiVampireDracula', 'GiWerewolf', 'GiKraken', 'GiGriffinSymbol', 'GiSlime',
+  ],
+  'RPG · Taberna y aventura': [
+    'GiTavern', 'GiBeerStein', 'GiWineGlass', 'GiMeat', 'GiTreasureMap', 'GiOpenChest',
+    'GiCoinsPile', 'GiLockpicks', 'GiDoor', 'GiBellShape', 'GiCampfire', 'GiRollingDices',
+    'GiCastle', 'GiCrown', 'GiKeyring', 'GiScrollUnfurled',
+  ],
+  'RPG · Ambiente': [
+    'GiStormy', 'GiThunderSkull', 'GiSnowflake1', 'GiWaveCrest', 'GiForest', 'GiCaveEntrance',
+    'GiWaterDrop', 'GiBigWave', 'GiTornado', 'GiVolcano', 'GiNightSky', 'GiDesert', 'GiSwamp',
+    'GiFootsteps', 'GiRiver', 'GiHeartBeats',
+  ],
+  'RPG · Música': [
+    'GiLyre', 'GiFlute', 'GiDrum', 'GiTrumpet', 'GiHarp', 'GiViolin', 'GiMusicalNotes',
+    'GiBugleCall', 'GiHorn', 'GiBanjo', 'GiTambourine',
+  ],
+};
+
+export const getGiCategories = (gi: GiRecord | null): IconCategoryGroup[] =>
+  gi
+    ? Object.entries(GI_CATEGORY_NAMES)
+        .map(([name, names]) => ({
+          name,
+          icons: names.filter((n) => gi[n]).map((n) => ({ name: n, label: prettyLabel(n) })),
+        }))
+        .filter((c) => c.icons.length > 0)
+    : [];
+
+/* ------------------------------------------------------------------ */
+/* Búsqueda sobre todo el catálogo                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Busca en Lucide + Game Icons (si ya cargaron). Devuelve máx `limit` resultados
+ * para no renderizar miles de iconos de golpe.
+ */
+export const searchIcons = (query: string, gi: GiRecord | null, limit = 200): IconEntry[] => {
+  const q = query.trim().toLowerCase().replace(/\s+/g, '');
+  if (!q) return [];
+  const all = [...getLucideCatalog(), ...getGiCatalog(gi)];
+  return all
+    .filter((i) => i.name.toLowerCase().includes(q) || i.label.toLowerCase().replace(/\s+/g, '').includes(q))
+    .slice(0, limit);
+};
+
+/* ------------------------------------------------------------------ */
+/* Componente                                                          */
+/* ------------------------------------------------------------------ */
 
 interface SoundIconProps {
   name: string;
@@ -243,6 +276,16 @@ interface SoundIconProps {
 }
 
 export const SoundIcon: React.FC<SoundIconProps> = ({ name, className = 'w-5 h-5', size }) => {
+  const isGi = name.startsWith('Gi');
+  const gi = useGiIcons(isGi);
+
+  if (isGi) {
+    const GiIcon = gi?.[name];
+    if (GiIcon) return <GiIcon className={className} size={size} />;
+    // mientras carga (o si no existe) mostramos el fallback
+    return <Volume2 className={className} size={size} />;
+  }
+
   const IconComponent = ICON_MAP[name] || Volume2;
   return <IconComponent className={className} size={size} />;
 };
