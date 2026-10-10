@@ -13,6 +13,8 @@ type PlaybackListener = (states: Record<string, SoundPlaybackState>) => void;
 class AudioEngine {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
+  private masterLimiter: DynamicsCompressorNode | null = null;
+  private highPassFilter: BiquadFilterNode | null = null;
   private tracksBus: GainNode | null = null;
   private compressor: DynamicsCompressorNode | null = null;
   private compressorGain: GainNode | null = null;
@@ -21,7 +23,7 @@ class AudioEngine {
   // In-memory decoded PCM buffer cache (eliminates mobile network streaming jitter)
   private bufferCache: Map<string, AudioBuffer> = new Map();
   private pendingFetches: Map<string, Promise<AudioBuffer>> = new Map();
-  // Background preloads run one at a time so decoding doesn't starve the audio thread
+  // Background preloads run one at a time and yield during playback so audio thread is never starved
   private preloadQueue: string[] = [];
   private isPreloading: boolean = false;
 
@@ -40,42 +42,71 @@ class AudioEngine {
       // 'playback' uses larger audio buffers: avoids underrun glitches on mobile CPUs
       this.ctx = new AudioCtx({ latencyHint: 'playback' });
 
-      // Master Gain
+      // Automatically recover if mobile browser suspends context on route/app switch
+      this.ctx.onstatechange = () => {
+        if (this.ctx && this.activeTracks.size > 0 && this.ctx.state === 'suspended') {
+          this.ctx.resume().catch(() => {});
+        }
+      };
+
+      // 1. Master Output Gain
+      // Scaled by 0.85 (-1.4 dBFS) safe ceiling to guarantee zero DAC inter-sample clipping on mobile speakers
       this.masterGain = this.ctx.createGain();
-      this.masterGain.gain.setValueAtTime(this.masterVolume, this.ctx.currentTime);
+      this.masterGain.gain.setValueAtTime(this.masterVolume * 0.85, this.ctx.currentTime);
       this.masterGain.connect(this.ctx.destination);
 
-      // Main Track Bus (all sound sources route into this bus)
+      // 2. Master Brickwall Limiter (-1.5 dB ceiling)
+      // Clamps summed signals (e.g. multi-track playback) so they never reach 0 dBFS clipping
+      this.masterLimiter = this.ctx.createDynamicsCompressor();
+      this.masterLimiter.threshold.setValueAtTime(-1.5, this.ctx.currentTime);
+      this.masterLimiter.knee.setValueAtTime(0, this.ctx.currentTime);
+      this.masterLimiter.ratio.setValueAtTime(20, this.ctx.currentTime);
+      this.masterLimiter.attack.setValueAtTime(0.002, this.ctx.currentTime);
+      this.masterLimiter.release.setValueAtTime(0.05, this.ctx.currentTime);
+      this.masterLimiter.connect(this.masterGain);
+
+      // 3. Sub-bass High-Pass Filter (Speaker Protection Filter)
+      // Mobile speakers physically cannot reproduce <80Hz. Unfiltered sub-bass causes excessive cone
+      // excursion, triggering hardware SmartAmp protection circuits (cutting audio for 50-100ms).
+      // Stripping <80Hz eliminates mobile speaker stutter while keeping full audible punch and warmth.
+      this.highPassFilter = this.ctx.createBiquadFilter();
+      this.highPassFilter.type = 'highpass';
+      this.highPassFilter.frequency.setValueAtTime(80, this.ctx.currentTime);
+      this.highPassFilter.Q.setValueAtTime(0.707, this.ctx.currentTime);
+      this.highPassFilter.connect(this.masterLimiter);
+
+      // 4. Main Track Bus (all sound sources route into this bus)
       this.tracksBus = this.ctx.createGain();
       this.tracksBus.gain.setValueAtTime(1.0, this.ctx.currentTime);
 
-      // Path A: Dynamics Compressor (smooth leveler & anti-clipping limiter)
+      // Path A: Dynamics Compressor (smooth leveler)
       this.compressor = this.ctx.createDynamicsCompressor();
-      this.compressor.threshold.setValueAtTime(-8, this.ctx.currentTime);
-      this.compressor.knee.setValueAtTime(24, this.ctx.currentTime);
-      this.compressor.ratio.setValueAtTime(3, this.ctx.currentTime);
-      this.compressor.attack.setValueAtTime(0.015, this.ctx.currentTime);
-      this.compressor.release.setValueAtTime(0.35, this.ctx.currentTime);
+      this.compressor.threshold.setValueAtTime(-14, this.ctx.currentTime);
+      this.compressor.knee.setValueAtTime(16, this.ctx.currentTime);
+      this.compressor.ratio.setValueAtTime(4, this.ctx.currentTime);
+      this.compressor.attack.setValueAtTime(0.010, this.ctx.currentTime);
+      this.compressor.release.setValueAtTime(0.25, this.ctx.currentTime);
 
+      // Attenuate by 0.70 (-3.1 dB) to counteract Web Audio DynamicsCompressor's built-in makeup gain
       this.compressorGain = this.ctx.createGain();
-      this.compressorGain.gain.setValueAtTime(this.isNormalizationEnabled ? 1.0 : 0.0, this.ctx.currentTime);
+      this.compressorGain.gain.setValueAtTime(this.isNormalizationEnabled ? 0.70 : 0.0, this.ctx.currentTime);
 
-      // Wire Path A: tracksBus -> compressor -> compressorGain -> masterGain
+      // Wire Path A: tracksBus -> compressor -> compressorGain -> highPassFilter
       this.tracksBus.connect(this.compressor);
       this.compressor.connect(this.compressorGain);
-      this.compressorGain.connect(this.masterGain);
+      this.compressorGain.connect(this.highPassFilter);
 
       // Path B: Pure Bypass (raw sound level, no compression)
       this.bypassGain = this.ctx.createGain();
       this.bypassGain.gain.setValueAtTime(this.isNormalizationEnabled ? 0.0 : 1.0, this.ctx.currentTime);
 
-      // Wire Path B: tracksBus -> bypassGain -> masterGain
+      // Wire Path B: tracksBus -> bypassGain -> highPassFilter
       this.tracksBus.connect(this.bypassGain);
-      this.bypassGain.connect(this.masterGain);
+      this.bypassGain.connect(this.highPassFilter);
     }
 
-    if (this.ctx.state === 'suspended') {
-      this.ctx.resume();
+    if (this.ctx.state !== 'running') {
+      this.ctx.resume().catch(() => {});
     }
 
     return this.ctx;
@@ -86,7 +117,7 @@ class AudioEngine {
     const now = this.ctx.currentTime;
 
     if (this.isNormalizationEnabled) {
-      this.compressorGain.gain.setTargetAtTime(1.0, now, 0.02);
+      this.compressorGain.gain.setTargetAtTime(0.70, now, 0.02);
       this.bypassGain.gain.setTargetAtTime(0.0, now, 0.02);
     } else {
       this.compressorGain.gain.setTargetAtTime(0.0, now, 0.02);
@@ -152,10 +183,19 @@ class AudioEngine {
     if (this.isPreloading) return;
     this.isPreloading = true;
     try {
-      let url: string | undefined;
-      while ((url = this.preloadQueue.shift())) {
-        if (this.bufferCache.has(url)) continue;
+      while (this.preloadQueue.length > 0) {
+        // If audio is actively playing, pause preloading so CPU audio decoding doesn't starve the audio thread
+        if (this.activeTracks.size > 0) {
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+
+        const url = this.preloadQueue.shift();
+        if (!url || this.bufferCache.has(url)) continue;
+
         await this.loadAudioBuffer(url).catch(() => {});
+        // Yield gently between audio decodes so main thread and UI remain completely responsive
+        await new Promise(r => setTimeout(r, 250));
       }
     } finally {
       this.isPreloading = false;
@@ -196,7 +236,7 @@ class AudioEngine {
   public async play(sound: SoundItem, allSoundsInBoard: SoundItem[] = []): Promise<void> {
     const ctx = this.initContext();
 
-    if (ctx.state === 'suspended') {
+    if (ctx.state !== 'running') {
       try {
         await ctx.resume();
       } catch (e) {
@@ -244,7 +284,7 @@ class AudioEngine {
         }
       };
 
-      source.start(0);
+      source.start(ctx.currentTime);
 
       this.activeTracks.set(sound.id, {
         source,
@@ -313,7 +353,7 @@ class AudioEngine {
     this.notify();
   }
 
-  public stopCategory(categoryId: string, allSoundsInBoard: SoundItem[], exceptSoundId?: string) {
+  public stopCategory(categoryId: string, allSoundsInBoard: SoundItem[] = [], exceptSoundId?: string) {
     const categorySoundIds = new Set(
       allSoundsInBoard
         .filter(s => s.categoryId === categoryId && s.id !== exceptSoundId)
@@ -376,7 +416,7 @@ class AudioEngine {
   public setMasterVolume(volume: number) {
     this.masterVolume = Math.max(0, Math.min(1, volume));
     if (this.masterGain && this.ctx) {
-      this.masterGain.gain.setValueAtTime(this.masterVolume, this.ctx.currentTime);
+      this.masterGain.gain.setValueAtTime(this.masterVolume * 0.85, this.ctx.currentTime);
     }
   }
 

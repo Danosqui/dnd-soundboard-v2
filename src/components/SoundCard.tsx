@@ -150,4 +150,26 @@ export const SoundCard: React.FC<SoundCardProps> = React.memo(({
       )}
     </div>
   );
+}, (prev, next) => {
+  if (prev.sound !== next.sound) return false;
+  if (prev.category !== next.category) return false;
+  if (prev.onPlayToggle !== next.onPlayToggle) return false;
+  if (prev.onOpenSettings !== next.onOpenSettings) return false;
+
+  const prevPlaying = !!prev.playbackState?.isPlaying;
+  const nextPlaying = !!next.playbackState?.isPlaying;
+  if (prevPlaying !== nextPlaying) return false;
+
+  // Neither is playing: completely skip re-rendering!
+  if (!prevPlaying && !nextPlaying) return true;
+
+  // Both are playing: check if duration or second changed
+  if (prev.playbackState?.duration !== next.playbackState?.duration) return false;
+
+  const prevSec = Math.floor(prev.playbackState?.currentTime || 0);
+  const nextSec = Math.floor(next.playbackState?.currentTime || 0);
+  if (prevSec !== nextSec) return false;
+
+  const diff = Math.abs((prev.playbackState?.currentTime || 0) - (next.playbackState?.currentTime || 0));
+  return diff < 0.4;
 });

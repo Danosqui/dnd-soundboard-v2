@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { SoundItem, SoundCategory, SoundPlaybackState, AppSettings } from './types/sound';
 import { storageService } from './services/storageService';
 import { audioEngine } from './services/audioEngine';
@@ -90,10 +90,21 @@ export const App: React.FC = () => {
     storageService.saveSettings(updated);
   };
 
-  // Sound triggering
-  const handlePlayToggle = (sound: SoundItem) => {
-    audioEngine.play(sound, sounds);
-  };
+  // Memoized sound triggering and settings handlers (prevents child re-renders on timer ticks)
+  const handlePlayToggle = useCallback((sound: SoundItem) => {
+    audioEngine.play(sound);
+  }, []);
+
+  const handleOpenSettings = useCallback((sound: SoundItem) => {
+    setEditingSound(sound);
+  }, []);
+
+  // Fast O(1) Category Lookup
+  const categoryMap = useMemo(() => {
+    const map = new Map<string, SoundCategory>();
+    categories.forEach(c => map.set(c.id, c));
+    return map;
+  }, [categories]);
 
   // Filter sounds by category and search
   const filteredSounds = useMemo(() => {
@@ -206,7 +217,7 @@ export const App: React.FC = () => {
         {filteredSounds.length > 0 ? (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 sm:gap-3">
             {filteredSounds.map((sound) => {
-              const cat = categories.find(c => c.id === sound.categoryId);
+              const cat = categoryMap.get(sound.categoryId);
               return (
                 <SoundCard
                   key={sound.id}
@@ -214,7 +225,7 @@ export const App: React.FC = () => {
                   category={cat}
                   playbackState={playbackStates[sound.id]}
                   onPlayToggle={handlePlayToggle}
-                  onOpenSettings={(s) => setEditingSound(s)}
+                  onOpenSettings={handleOpenSettings}
                 />
               );
             })}
